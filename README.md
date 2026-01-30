@@ -62,7 +62,7 @@ A complete personal finance management platform with AI-powered insights.
 
 ```bash
 # Clone and setup
-git clone https://github.com/yourorg/fpm.git
+git clone https://github.com/abhishekyadav2000/fpm.git
 cd fpm
 
 # Start all services
