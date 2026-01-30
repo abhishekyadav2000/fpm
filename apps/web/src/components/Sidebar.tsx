@@ -8,7 +8,7 @@ import {
   PiggyBank,
   TrendingUp,
   Briefcase,
-  Lightbulb,
+  Gem,
   Upload,
   Settings,
   Bot,
@@ -24,7 +24,7 @@ const navItems = [
   { href: '/budgets', label: 'Budgets', icon: PiggyBank },
   { href: '/net-worth', label: 'Net Worth', icon: TrendingUp },
   { href: '/portfolio', label: 'Portfolio', icon: Briefcase },
-  { href: '/insights', label: 'Insights', icon: Lightbulb },
+  { href: '/insights', label: 'Insight Miner', icon: Gem },
   { href: '/import', label: 'Import', icon: Upload },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];

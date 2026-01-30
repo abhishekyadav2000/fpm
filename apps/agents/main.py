@@ -509,6 +509,400 @@ async def list_runs(user_id: str = Query(None), limit: int = 20):
     runs.sort(key=lambda x: x.get("started_at", ""), reverse=True)
     return runs[:limit]
 
+# ============ INSIGHT MINER ============
+
+class InsightMinerRequest(BaseModel):
+    user_id: str = "default"
+    depth: str = "standard"  # quick, standard, deep
+    focus_areas: Optional[list] = None  # spending, savings, investments, debt, all
+
+class MinedInsight(BaseModel):
+    id: str
+    type: str  # opportunity, warning, achievement, tip, pattern, anomaly
+    category: str  # spending, savings, investments, debt, income
+    title: str
+    description: str
+    impact: str  # high, medium, low
+    action: Optional[str] = None
+    evidence: Optional[str] = None
+    confidence: float = 0.8
+
+async def mine_spending_insights(run_id: str, user_id: str) -> list:
+    """Deep dive into spending patterns"""
+    insights = []
+    
+    # Get spending by category
+    try:
+        category_spend = await get_analytics("/metrics/category-spend", {"user_id": user_id, "months": 3})
+        cashflow = await get_analytics("/metrics/cashflow", {"user_id": user_id, "months": 6})
+        
+        if category_spend.get("data"):
+            # Find top spending categories
+            top_categories = sorted(
+                category_spend["data"], 
+                key=lambda x: x.get("total", 0), 
+                reverse=True
+            )[:5]
+            
+            # Build prompt for spending analysis
+            prompt = f"""Analyze these spending patterns and identify actionable insights:
+
+Top Spending Categories (last 3 months):
+{json.dumps(top_categories, indent=2)}
+
+Monthly Cashflow Trend:
+{json.dumps(cashflow.get("data", []), indent=2)}
+
+For each insight, provide:
+1. A specific observation about spending
+2. Why it matters (impact)
+3. One actionable recommendation
+
+Format as JSON array with objects containing: title, description, impact (high/medium/low), action
+Return 3-5 insights. Be specific with numbers from the data provided."""
+
+            system = """You are a financial analyst. Return ONLY valid JSON array. 
+Example: [{"title": "High dining spend", "description": "Dining out accounts for 25% of expenses", "impact": "high", "action": "Set a $300/month dining budget"}]"""
+            
+            response = await call_ollama(prompt, system)
+            
+            try:
+                # Try to parse LLM response as JSON
+                parsed = json.loads(response)
+                if isinstance(parsed, list):
+                    for i, item in enumerate(parsed[:5]):
+                        insights.append({
+                            "id": f"spend-{i+1}",
+                            "type": "pattern",
+                            "category": "spending",
+                            "title": item.get("title", "Spending Pattern"),
+                            "description": item.get("description", ""),
+                            "impact": item.get("impact", "medium"),
+                            "action": item.get("action"),
+                            "evidence": "category-spend-data",
+                            "confidence": 0.85
+                        })
+            except json.JSONDecodeError:
+                # Fallback: create a general insight from the response
+                insights.append({
+                    "id": "spend-analysis",
+                    "type": "tip",
+                    "category": "spending",
+                    "title": "Spending Analysis",
+                    "description": response[:500] if response else "Review your top spending categories for savings opportunities.",
+                    "impact": "medium",
+                    "action": "Review expenses in Ledger",
+                    "evidence": "category-spend-data",
+                    "confidence": 0.7
+                })
+                
+    except Exception as e:
+        print(f"Spending analysis error: {e}")
+        
+    return insights
+
+async def mine_savings_insights(run_id: str, user_id: str) -> list:
+    """Analyze savings rate and opportunities"""
+    insights = []
+    
+    try:
+        cashflow = await get_analytics("/metrics/cashflow", {"user_id": user_id, "months": 6})
+        net_worth = await get_analytics("/metrics/net-worth", {"user_id": user_id})
+        
+        if cashflow.get("data"):
+            months_data = cashflow["data"]
+            
+            # Calculate savings rates
+            savings_rates = []
+            for month in months_data:
+                income = month.get("income", 0)
+                expenses = month.get("expenses", 0)
+                if income > 0:
+                    rate = ((income - expenses) / income) * 100
+                    savings_rates.append({
+                        "month": month.get("month"),
+                        "rate": round(rate, 1),
+                        "saved": income - expenses
+                    })
+            
+            if savings_rates:
+                avg_rate = sum(r["rate"] for r in savings_rates) / len(savings_rates)
+                trend = savings_rates[0]["rate"] - savings_rates[-1]["rate"] if len(savings_rates) > 1 else 0
+                
+                # Generate insights based on savings rate
+                if avg_rate >= 20:
+                    insights.append({
+                        "id": "savings-excellent",
+                        "type": "achievement",
+                        "category": "savings",
+                        "title": f"Excellent Savings Rate: {avg_rate:.0f}%",
+                        "description": f"You're saving above the recommended 20% rate. Your 6-month average is {avg_rate:.1f}%. Keep it up!",
+                        "impact": "high",
+                        "action": "Consider increasing investments",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.95
+                    })
+                elif avg_rate >= 10:
+                    insights.append({
+                        "id": "savings-good",
+                        "type": "tip",
+                        "category": "savings",
+                        "title": f"Good Progress: {avg_rate:.0f}% Savings Rate",
+                        "description": f"Your average savings rate is {avg_rate:.1f}%. Try to reach 20% for faster wealth building.",
+                        "impact": "medium",
+                        "action": "Find $200/month to save more",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.9
+                    })
+                elif avg_rate >= 0:
+                    insights.append({
+                        "id": "savings-low",
+                        "type": "warning",
+                        "category": "savings",
+                        "title": f"Low Savings Rate: {avg_rate:.0f}%",
+                        "description": f"Your savings rate of {avg_rate:.1f}% is below target. Consider reviewing expenses.",
+                        "impact": "high",
+                        "action": "Use the 50/30/20 budget rule",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.9
+                    })
+                else:
+                    insights.append({
+                        "id": "savings-negative",
+                        "type": "warning",
+                        "category": "savings",
+                        "title": "Spending Exceeds Income",
+                        "description": f"You're spending {abs(avg_rate):.1f}% more than you earn on average. This is unsustainable.",
+                        "impact": "high",
+                        "action": "Create an emergency budget",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.95
+                    })
+                
+                # Trend insight
+                if abs(trend) > 5:
+                    if trend > 0:
+                        insights.append({
+                            "id": "savings-trend-up",
+                            "type": "achievement",
+                            "category": "savings",
+                            "title": "Savings Rate Improving",
+                            "description": f"Your savings rate increased by {trend:.1f}% over the last 6 months. Great progress!",
+                            "impact": "medium",
+                            "evidence": "cashflow-data",
+                            "confidence": 0.85
+                        })
+                    else:
+                        insights.append({
+                            "id": "savings-trend-down",
+                            "type": "warning",
+                            "category": "savings",
+                            "title": "Savings Rate Declining",
+                            "description": f"Your savings rate dropped by {abs(trend):.1f}% over 6 months. Review recent expenses.",
+                            "impact": "high",
+                            "action": "Identify new expenses to cut",
+                            "evidence": "cashflow-data",
+                            "confidence": 0.85
+                        })
+                        
+    except Exception as e:
+        print(f"Savings analysis error: {e}")
+        
+    return insights
+
+async def mine_investment_insights(run_id: str, user_id: str) -> list:
+    """Analyze investment portfolio"""
+    insights = []
+    
+    try:
+        portfolio = await get_analytics("/metrics/portfolio-summary", {"user_id": user_id})
+        
+        if portfolio.get("holdings"):
+            holdings = portfolio["holdings"]
+            total_value = portfolio.get("total_value", 0)
+            
+            # Check concentration
+            for h in holdings:
+                if total_value > 0:
+                    weight = (h.get("market_value", 0) / total_value) * 100
+                    if weight > 30:
+                        insights.append({
+                            "id": f"invest-concentration-{h.get('symbol', 'unknown')}",
+                            "type": "warning",
+                            "category": "investments",
+                            "title": f"High Concentration in {h.get('symbol', 'Unknown')}",
+                            "description": f"{h.get('symbol')} represents {weight:.0f}% of your portfolio. Consider diversifying.",
+                            "impact": "high",
+                            "action": "Rebalance portfolio",
+                            "evidence": "portfolio-data",
+                            "confidence": 0.9
+                        })
+            
+            # Overall performance
+            total_return = portfolio.get("total_return_pct", 0)
+            if total_return > 15:
+                insights.append({
+                    "id": "invest-performance-great",
+                    "type": "achievement",
+                    "category": "investments",
+                    "title": f"Strong Portfolio Performance: {total_return:.1f}%",
+                    "description": f"Your portfolio is up {total_return:.1f}%. Consider rebalancing to lock in gains.",
+                    "impact": "medium",
+                    "evidence": "portfolio-data",
+                    "confidence": 0.9
+                })
+            elif total_return < -10:
+                insights.append({
+                    "id": "invest-performance-down",
+                    "type": "tip",
+                    "category": "investments",
+                    "title": f"Portfolio Down {abs(total_return):.1f}%",
+                    "description": "Stay the course with long-term investments. Consider adding to positions if you have spare cash.",
+                    "impact": "medium",
+                    "action": "Review investment timeline",
+                    "evidence": "portfolio-data",
+                    "confidence": 0.85
+                })
+            
+            # Diversification check
+            if len(holdings) < 5:
+                insights.append({
+                    "id": "invest-diversify",
+                    "type": "tip",
+                    "category": "investments",
+                    "title": "Consider More Diversification",
+                    "description": f"You have {len(holdings)} holdings. Consider adding index funds or ETFs for broader exposure.",
+                    "impact": "medium",
+                    "action": "Research low-cost ETFs",
+                    "evidence": "portfolio-data",
+                    "confidence": 0.8
+                })
+                
+    except Exception as e:
+        print(f"Investment analysis error: {e}")
+        
+    return insights
+
+async def mine_anomaly_insights(run_id: str, user_id: str) -> list:
+    """Detect unusual patterns and anomalies"""
+    insights = []
+    
+    try:
+        cashflow = await get_analytics("/metrics/cashflow", {"user_id": user_id, "months": 6})
+        
+        if cashflow.get("data") and len(cashflow["data"]) >= 3:
+            months = cashflow["data"]
+            
+            # Calculate averages
+            avg_income = sum(m.get("income", 0) for m in months) / len(months)
+            avg_expense = sum(m.get("expenses", 0) for m in months) / len(months)
+            
+            # Check for anomalies in most recent month
+            latest = months[0]
+            latest_income = latest.get("income", 0)
+            latest_expense = latest.get("expenses", 0)
+            
+            # Income anomaly
+            if avg_income > 0:
+                income_diff_pct = ((latest_income - avg_income) / avg_income) * 100
+                if income_diff_pct > 30:
+                    insights.append({
+                        "id": "anomaly-income-spike",
+                        "type": "opportunity",
+                        "category": "income",
+                        "title": f"Income Spike: +{income_diff_pct:.0f}% This Month",
+                        "description": f"This month's income is ${latest_income:,.0f}, significantly above your ${avg_income:,.0f} average. Great time to boost savings!",
+                        "impact": "high",
+                        "action": "Save or invest the extra income",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.9
+                    })
+                elif income_diff_pct < -30:
+                    insights.append({
+                        "id": "anomaly-income-drop",
+                        "type": "warning",
+                        "category": "income",
+                        "title": f"Income Drop: {income_diff_pct:.0f}%",
+                        "description": f"This month's income is below average. Make sure this isn't a recurring issue.",
+                        "impact": "high",
+                        "action": "Review income sources",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.85
+                    })
+            
+            # Expense anomaly
+            if avg_expense > 0:
+                expense_diff_pct = ((latest_expense - avg_expense) / avg_expense) * 100
+                if expense_diff_pct > 25:
+                    insights.append({
+                        "id": "anomaly-expense-spike",
+                        "type": "warning",
+                        "category": "spending",
+                        "title": f"Expense Spike: +{expense_diff_pct:.0f}% This Month",
+                        "description": f"Spending of ${latest_expense:,.0f} is above your ${avg_expense:,.0f} average. Check for one-time expenses.",
+                        "impact": "medium",
+                        "action": "Review recent transactions",
+                        "evidence": "cashflow-data",
+                        "confidence": 0.85
+                    })
+                    
+    except Exception as e:
+        print(f"Anomaly analysis error: {e}")
+        
+    return insights
+
+@app.post("/mine-insights")
+async def mine_insights(request: InsightMinerRequest):
+    """Deep insight mining across all financial data"""
+    run_id = str(uuid.uuid4())
+    all_insights = []
+    
+    focus = request.focus_areas or ["spending", "savings", "investments", "anomalies"]
+    
+    # Run insight miners based on focus areas
+    if "spending" in focus or "all" in focus:
+        spending_insights = await mine_spending_insights(run_id, request.user_id)
+        all_insights.extend(spending_insights)
+    
+    if "savings" in focus or "all" in focus:
+        savings_insights = await mine_savings_insights(run_id, request.user_id)
+        all_insights.extend(savings_insights)
+    
+    if "investments" in focus or "all" in focus:
+        investment_insights = await mine_investment_insights(run_id, request.user_id)
+        all_insights.extend(investment_insights)
+    
+    if "anomalies" in focus or "all" in focus:
+        anomaly_insights = await mine_anomaly_insights(run_id, request.user_id)
+        all_insights.extend(anomaly_insights)
+    
+    # Sort by impact (high first) then confidence
+    impact_order = {"high": 0, "medium": 1, "low": 2}
+    all_insights.sort(key=lambda x: (impact_order.get(x.get("impact", "low"), 2), -x.get("confidence", 0)))
+    
+    # Log the run
+    agent_runs[run_id] = {
+        "id": run_id,
+        "user_id": request.user_id,
+        "workflow": "insight-miner",
+        "status": "completed",
+        "started_at": datetime.now().isoformat(),
+        "completed_at": datetime.now().isoformat(),
+        "output": {
+            "insights": all_insights,
+            "total_count": len(all_insights),
+            "focus_areas": focus
+        }
+    }
+    
+    return {
+        "run_id": run_id,
+        "insights": all_insights,
+        "total_count": len(all_insights),
+        "focus_areas": focus,
+        "generated_at": datetime.now().isoformat()
+    }
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "6000"))
