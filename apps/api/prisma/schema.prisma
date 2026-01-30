@@ -1,0 +1,330 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  user
+  readonly
+}
+
+enum AccountType {
+  checking
+  savings
+  credit
+  investment
+  loan
+  cash
+}
+
+enum ImportStatus {
+  staged
+  committed
+  rolledback
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         Role     @default(user)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  accounts     Account[]
+  categories   Category[]
+  budgetMonths BudgetMonth[]
+  portfolios   Portfolio[]
+  importBatches ImportBatch[]
+  agentRuns    AgentRun[]
+  decisionLogs DecisionLog[]
+}
+
+model Account {
+  id          String      @id @default(uuid())
+  userId      String
+  name        String
+  type        AccountType
+  institution String?
+  currency    String      @default("USD")
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id])
+  transactions Transaction[]
+}
+
+model Category {
+  id        String   @id @default(uuid())
+  userId    String
+  name      String
+  parentId  String?
+  icon      String?
+  color     String?
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user              User                @relation(fields: [userId], references: [id])
+  parent            Category?           @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children          Category[]          @relation("CategoryHierarchy")
+  transactions      Transaction[]
+  transactionSplits TransactionSplit[]
+  budgetEnvelopes   BudgetEnvelope[]
+  rules             Rule[]
+}
+
+model Transaction {
+  id            String    @id @default(uuid())
+  accountId     String
+  categoryId    String?
+  date          DateTime
+  description   String
+  merchant      String?
+  amount        Decimal   @db.Decimal(19, 4)
+  currency      String    @default("USD")
+  notes         String?
+  isReconciled  Boolean   @default(false)
+  importBatchId String?
+  rowHash       String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  account  Account            @relation(fields: [accountId], references: [id])
+  category Category?          @relation(fields: [categoryId], references: [id])
+  importBatch ImportBatch?    @relation(fields: [importBatchId], references: [id])
+  splits   TransactionSplit[]
+
+  @@index([accountId, date])
+  @@index([rowHash])
+}
+
+model TransactionSplit {
+  id            String  @id @default(uuid())
+  transactionId String
+  categoryId    String
+  amount        Decimal @db.Decimal(19, 4)
+  memo          String?
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  category    Category    @relation(fields: [categoryId], references: [id])
+}
+
+model Rule {
+  id          String   @id @default(uuid())
+  categoryId  String
+  pattern     String
+  field       String   @default("description")
+  priority    Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  category Category @relation(fields: [categoryId], references: [id])
+}
+
+model BudgetMonth {
+  id        String   @id @default(uuid())
+  userId    String
+  month     DateTime
+  notes     String?
+  createdAt DateTime @default(now())
+
+  user      User             @relation(fields: [userId], references: [id])
+  envelopes BudgetEnvelope[]
+
+  @@unique([userId, month])
+}
+
+model BudgetEnvelope {
+  id            String  @id @default(uuid())
+  budgetMonthId String
+  categoryId    String
+  assigned      Decimal @db.Decimal(19, 4) @default(0)
+  spent         Decimal @db.Decimal(19, 4) @default(0)
+
+  budgetMonth BudgetMonth @relation(fields: [budgetMonthId], references: [id], onDelete: Cascade)
+  category    Category    @relation(fields: [categoryId], references: [id])
+  moves       MoneyMove[]
+
+  @@unique([budgetMonthId, categoryId])
+}
+
+model MoneyMove {
+  id         String   @id @default(uuid())
+  fromId     String?
+  toId       String
+  amount     Decimal  @db.Decimal(19, 4)
+  note       String?
+  createdAt  DateTime @default(now())
+
+  from BudgetEnvelope? @relation(fields: [fromId], references: [id])
+}
+
+model ImportBatch {
+  id         String       @id @default(uuid())
+  userId     String
+  filename   String
+  status     ImportStatus @default(staged)
+  rowCount   Int          @default(0)
+  errorCount Int          @default(0)
+  createdAt  DateTime     @default(now())
+  committedAt DateTime?
+
+  user         User          @relation(fields: [userId], references: [id])
+  rows         ImportRow[]
+  transactions Transaction[]
+}
+
+model ImportRow {
+  id        String  @id @default(uuid())
+  batchId   String
+  rowNumber Int
+  rawData   Json
+  rowHash   String
+  error     String?
+  isDupe    Boolean @default(false)
+
+  batch ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([rowHash])
+}
+
+model Portfolio {
+  id        String   @id @default(uuid())
+  userId    String
+  name      String
+  notes     String?
+  createdAt DateTime @default(now())
+
+  user     User      @relation(fields: [userId], references: [id])
+  holdings Holding[]
+  targets  AllocationTarget[]
+  snapshots PerformanceSnapshot[]
+}
+
+model Holding {
+  id          String   @id @default(uuid())
+  portfolioId String
+  symbol      String
+  shares      Decimal  @db.Decimal(19, 8)
+  costBasis   Decimal  @db.Decimal(19, 4)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id])
+  trades    Trade[]
+}
+
+model Trade {
+  id        String   @id @default(uuid())
+  holdingId String
+  date      DateTime
+  action    String
+  shares    Decimal  @db.Decimal(19, 8)
+  price     Decimal  @db.Decimal(19, 4)
+  fees      Decimal  @db.Decimal(19, 4) @default(0)
+
+  holding Holding @relation(fields: [holdingId], references: [id])
+}
+
+model Price {
+  id        String   @id @default(uuid())
+  symbol    String
+  date      DateTime
+  close     Decimal  @db.Decimal(19, 4)
+  source    String   @default("manual")
+  createdAt DateTime @default(now())
+
+  @@unique([symbol, date])
+  @@index([symbol, date])
+}
+
+model PerformanceSnapshot {
+  id          String   @id @default(uuid())
+  portfolioId String
+  date        DateTime
+  totalValue  Decimal  @db.Decimal(19, 4)
+  totalCost   Decimal  @db.Decimal(19, 4)
+  dayChange   Decimal  @db.Decimal(19, 4) @default(0)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id])
+
+  @@unique([portfolioId, date])
+}
+
+model AllocationTarget {
+  id          String  @id @default(uuid())
+  portfolioId String
+  assetClass  String
+  targetPct   Decimal @db.Decimal(5, 2)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id])
+}
+
+model InsightEvent {
+  id          String   @id @default(uuid())
+  type        String
+  severity    String   @default("info")
+  title       String
+  description String
+  evidence    Json
+  agentRunId  String?
+  createdAt   DateTime @default(now())
+}
+
+model DecisionLog {
+  id         String   @id @default(uuid())
+  userId     String
+  decision   String
+  reasoning  String
+  outcome    String?
+  agentRunId String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model AgentRun {
+  id          String      @id @default(uuid())
+  userId      String
+  workflow    String
+  status      String      @default("running")
+  input       Json
+  output      Json?
+  startedAt   DateTime    @default(now())
+  completedAt DateTime?
+
+  user  User        @relation(fields: [userId], references: [id])
+  steps AgentStep[]
+}
+
+model AgentStep {
+  id        String   @id @default(uuid())
+  runId     String
+  agent     String
+  action    String
+  input     Json
+  output    Json?
+  evidenceIds String[]
+  durationMs Int?
+  createdAt DateTime @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+}
+
+model PromptVersion {
+  id        String   @id @default(uuid())
+  agent     String
+  version   Int
+  template  String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([agent, version])
+}
